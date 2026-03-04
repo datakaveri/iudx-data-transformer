@@ -3,14 +3,20 @@ Elasticsearch client wrapper.
 
 New-document detection strategy
 ---------------------------------
-Documents are fetched using ES `search_after` pagination with a stable sort:
-  1. [sort_field ASC, _id ASC]  – when a timestamp/sort field is configured
-  2. [_id ASC]                  – fallback (works for string _id ordering)
+Documents are fetched using ES `search_after` pagination sorted by `_seq_no`.
 
-The caller stores the last returned sort-key vector as the checkpoint.
-On the next run, passing that vector as `search_after` returns only documents
-inserted *after* the checkpoint, giving us an incremental / delta fetch with
-no duplicates.
+`_seq_no` is an internal Elasticsearch counter that is assigned at indexing
+time and increments monotonically per primary shard.  For single-shard indices
+(number_of_shards=1, as configured in docker-compose.infra.yml) this gives a
+globally ordered insertion sequence.
+
+Sorting by `_seq_no` means the checkpoint tracks *when a document was indexed*,
+not the value of any content field such as `observationDateTime`.  This
+correctly captures documents that arrive out-of-order or carry backdated
+timestamps — a common pattern in IoT and batch-ingestion pipelines.
+
+Previous approach (sort_field + _id) missed documents whose content timestamp
+fell before the last checkpoint even though they were newly inserted.
 
 If an index has no checkpoint (first run) all documents are returned.
 If the index has not grown since the last run, an empty list is returned.
@@ -32,9 +38,8 @@ class ESClient:
         """
         Expected config keys:
           host, port, scheme (http/https), username, password,
-          sort_field (optional), batch_size (optional, default 10000)
+          batch_size (optional, default 10000)
         """
-        self._sort_field: Optional[str] = config.get("sort_field")
         self._batch_size: int = int(config.get("batch_size", 10_000))
 
         hosts = [{
@@ -138,16 +143,9 @@ class ESClient:
     # ------------------------------------------------------------------
 
     def _build_sort(self) -> list[dict]:
-        sort: list[dict] = []
-        if self._sort_field:
-            sort.append({
-                self._sort_field: {
-                    "order": "asc",
-                    "unmapped_type": "date",   # graceful fallback for missing field
-                }
-            })
-        sort.append({"_id": "asc"})  # stable tiebreaker
-        return sort
+        # Sort by _seq_no (insertion order) so that search_after tracks
+        # when documents were indexed, not their content timestamps.
+        return [{"_seq_no": "asc"}]
 
     def close(self) -> None:
         self._client.close()
