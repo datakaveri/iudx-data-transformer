@@ -56,10 +56,6 @@ def json_records_to_parquet(records: list[dict]) -> bytes:
 
     df = pd.DataFrame(normalised)
 
-    # Coerce object columns that look like numeric to their proper types
-    for col in df.select_dtypes(include="object").columns:
-        df[col] = pd.to_numeric(df[col], errors="ignore")
-
     table = pa.Table.from_pandas(df, preserve_index=False)
 
     buf = io.BytesIO()
