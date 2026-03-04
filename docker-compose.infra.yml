@@ -1,0 +1,80 @@
+# =============================================================================
+# Infrastructure stack – Elasticsearch + MinIO (S3-compatible object store)
+#
+# Start:  docker compose -f docker-compose.infra.yml up -d
+# Stop:   docker compose -f docker-compose.infra.yml down
+#
+# This file owns the shared network and named volumes.
+# The cron-job stack (docker-compose.cronjob.yml) joins this network as
+# an external network.
+# =============================================================================
+
+version: "3.9"
+
+networks:
+  iudx-net:
+    name: iudx-net          # explicit name so the cronjob stack can reference it
+
+volumes:
+  es-data:
+  minio-data:
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Elasticsearch (single-node, development-friendly settings)
+  # --------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.18
+    container_name: iudx-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - cluster.name=iudx-cluster
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=changeme        # matches config.yaml elasticsearch.password
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - iudx-net
+    healthcheck:
+      test: >
+        curl -s -u elastic:changeme http://localhost:9200/_cluster/health
+        | grep -qE '"status":"(green|yellow)"'
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # MinIO – S3-compatible object store
+  # --------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: iudx-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin       # matches config.yaml object_store.access_key
+      - MINIO_ROOT_PASSWORD=minioadmin   # matches config.yaml object_store.secret_key
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # MinIO web console  (http://localhost:9001)
+    networks:
+      - iudx-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped

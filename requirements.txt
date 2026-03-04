@@ -1,0 +1,6 @@
+elasticsearch>=7.17,<8.0      # ES 7.x compatible client
+boto3>=1.28                   # S3 / MinIO object store
+pyarrow>=14.0                 # Parquet read/write
+pandas>=2.1                   # DataFrame manipulation
+pyyaml>=6.0                   # Config file parsing
+apscheduler>=3.10             # In-process scheduler

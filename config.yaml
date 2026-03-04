@@ -1,0 +1,40 @@
+# =============================================================================
+# IUDX Data Transformer – Configuration
+# =============================================================================
+# This file is mounted into the cron-job container.
+# Do NOT commit credentials to source control; use a secrets manager or
+# Docker Secrets / Kubernetes Secrets in production.
+# =============================================================================
+
+# ---- Elasticsearch ----------------------------------------------------------
+elasticsearch:
+  host: elasticsearch          # service name inside docker network (or IP/FQDN)
+  port: 9200
+  scheme: http                 # http | https
+  username: elastic
+  password: changeme
+
+  # Optional: field used to sort documents for incremental fetch.
+  # Set to a timestamp field present in your documents (e.g. observationDateTime).
+  # Leave empty ("") to fall back to _id-based ordering.
+  sort_field: "observationDateTime"
+
+  # Number of documents fetched per ES scroll page (tune for memory vs. speed)
+  batch_size: 10000
+
+# ---- Object Store (S3 / MinIO) ----------------------------------------------
+object_store:
+  endpoint_url: http://minio:9000   # MinIO service name or S3 endpoint
+  access_key: minioadmin
+  secret_key: minioadmin
+  bucket: iudx-data                 # bucket is auto-created if it does not exist
+  region: us-east-1                 # ignored by MinIO but required by boto3
+
+# ---- Transformer Behaviour --------------------------------------------------
+transformer:
+  # How often the job runs (in minutes)
+  schedule_minutes: 15
+
+  # Persistent file that tracks the last-pushed document per index.
+  # Mount a volume to this path so checkpoints survive container restarts.
+  checkpoint_file: /data/checkpoints/state.json

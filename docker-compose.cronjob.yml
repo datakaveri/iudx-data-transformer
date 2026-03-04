@@ -1,0 +1,61 @@
+# =============================================================================
+# Cron-job stack – IUDX Data Transformer
+#
+# Prerequisites:
+#   1. Build the image:
+#        docker compose -f docker-compose.cronjob.yml build
+#   2. Start infrastructure first:
+#        docker compose -f docker-compose.infra.yml up -d
+#   3. Start transformer:
+#        docker compose -f docker-compose.cronjob.yml up -d
+#
+# To use custom credentials / endpoints, edit config.yaml before starting.
+# =============================================================================
+
+version: "3.9"
+
+networks:
+  # Join the network created by the infra stack (must already exist)
+  iudx-net:
+    external: true
+    name: iudx-net
+
+volumes:
+  # Persistent checkpoint storage – survives container restarts/updates
+  transformer-checkpoints:
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Data Transformer (cron job)
+  # --------------------------------------------------------------------------
+  transformer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iudx-data-transformer:latest
+    container_name: iudx-transformer
+    networks:
+      - iudx-net
+    volumes:
+      # Mount config (read-only) – edit config.yaml to change credentials/URLs
+      - ./config.yaml:/app/config.yaml:ro
+      # Persistent checkpoints volume – must match transformer.checkpoint_file in config.yaml
+      - transformer-checkpoints:/data/checkpoints
+    environment:
+      # Override config path if needed; defaults to /app/config.yaml
+      - CONFIG_PATH=/app/config.yaml
+    depends_on:
+      # These service names match the infra stack; healthchecks are defined there.
+      # 'service_healthy' requires Docker Compose v2 with the infra network visible.
+      # If you deploy the stacks independently, remove this block and start manually.
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
