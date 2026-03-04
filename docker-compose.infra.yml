@@ -1,5 +1,5 @@
 # =============================================================================
-# Infrastructure stack – Elasticsearch + MinIO (S3-compatible object store)
+# Infrastructure stack – Elasticsearch + Kibana + MinIO (S3-compatible object store)
 #
 # Start:  docker compose -f docker-compose.infra.yml up -d
 # Stop:   docker compose -f docker-compose.infra.yml down
@@ -7,6 +7,10 @@
 # This file owns the shared network and named volumes.
 # The cron-job stack (docker-compose.cronjob.yml) joins this network as
 # an external network.
+#
+# Web UIs (once healthy):
+#   Kibana     → http://localhost:5601  (login: elastic / changeme)
+#   MinIO      → http://localhost:9001  (login: minioadmin / minioadmin)
 # =============================================================================
 
 version: "3.9"
@@ -18,6 +22,7 @@ networks:
 volumes:
   es-data:
   minio-data:
+  kibana-data:
 
 services:
 
@@ -52,6 +57,35 @@ services:
       timeout: 10s
       retries: 10
       start_period: 60s
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Kibana – UI for Elasticsearch index management and data exploration
+  # --------------------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.17.18   # must match ES version
+    container_name: iudx-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=elastic
+      - ELASTICSEARCH_PASSWORD=changeme               # matches ELASTIC_PASSWORD above
+      - SERVER_NAME=iudx-kibana
+      - XPACK_SECURITY_ENABLED=true
+    volumes:
+      - kibana-data:/usr/share/kibana/data
+    ports:
+      - "5601:5601"    # Kibana UI  (http://localhost:5601)
+    networks:
+      - iudx-net
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s     # Kibana takes longer to initialise than ES
     restart: unless-stopped
 
   # --------------------------------------------------------------------------
