@@ -45,14 +45,7 @@ services:
     environment:
       # Override config path if needed; defaults to /app/config.yaml
       - CONFIG_PATH=/app/config.yaml
-    depends_on:
-      # These service names match the infra stack; healthchecks are defined there.
-      # 'service_healthy' requires Docker Compose v2 with the infra network visible.
-      # If you deploy the stacks independently, remove this block and start manually.
-      elasticsearch:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+    # Ensure docker-compose.infra.yml is up before starting this stack.
     restart: unless-stopped
     logging:
       driver: "json-file"
