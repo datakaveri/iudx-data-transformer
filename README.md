@@ -11,6 +11,7 @@ Incrementally exports JSON documents from Elasticsearch to Parquet files in an S
 - [How Duplicate Prevention Works](#how-duplicate-prevention-works)
 - [Configuration Reference](#configuration-reference)
 - [Deployment](#deployment)
+- [Kibana – Index Management](#kibana--index-management)
 - [Observing Logs](#observing-logs)
 - [Operations Runbook](#operations-runbook)
 
@@ -19,23 +20,24 @@ Incrementally exports JSON documents from Elasticsearch to Parquet files in an S
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        iudx-net (Docker network)                │
-│                                                                 │
-│  ┌─────────────────┐        ┌──────────────────────────────┐   │
-│  │  Elasticsearch  │        │     MinIO (S3-compatible)    │   │
-│  │  :9200          │        │     :9000 (API)              │   │
-│  │                 │        │     :9001 (Web console)      │   │
-│  │  index-A  ──────┼──┐     └──────────────┬───────────────┘   │
-│  │  index-B  ──────┼──┤                    │                   │
-│  │  index-C  ──────┼──┤                    │                   │
-│  └─────────────────┘  │                    │                   │
-│                        │  ┌─────────────┐  │                   │
-│                        └──► Transformer ├──┘                   │
-│                           │  (cron job) │                      │
-│                           └──────┬──────┘                      │
-│                                  │                              │
-└──────────────────────────────────┼──────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          iudx-net (Docker network)                   │
+│                                                                      │
+│  ┌─────────────────┐   reads   ┌────────────┐                        │
+│  │  Elasticsearch  │◄──────────│   Kibana   │                        │
+│  │  :9200          │           │   :5601    │                        │
+│  │                 │           └────────────┘                        │
+│  │  index-A  ──────┼──┐     ┌──────────────────────────────┐        │
+│  │  index-B  ──────┼──┤     │     MinIO (S3-compatible)    │        │
+│  │  index-C  ──────┼──┤     │     :9000 (API)              │        │
+│  └─────────────────┘  │     │     :9001 (Web console)      │        │
+│                        │     └──────────────┬───────────────┘        │
+│                        │  ┌─────────────┐   │                        │
+│                        └──► Transformer ├───┘                        │
+│                           │  (cron job) │                            │
+│                           └──────┬──────┘                            │
+│                                  │                                    │
+└──────────────────────────────────┼────────────────────────────────────┘
                                    │ /data/checkpoints/state.json
                               (named volume)
 ```
@@ -78,7 +80,7 @@ Each file contains only the documents that arrived between two consecutive runs.
 ```
 iudx-data-transformer/
 │
-├── docker-compose.infra.yml    Infrastructure: Elasticsearch + MinIO
+├── docker-compose.infra.yml    Infrastructure: Elasticsearch + Kibana + MinIO
 │                               Owns the shared Docker network (iudx-net)
 │                               and named data volumes.
 │
@@ -240,17 +242,17 @@ cd iudx-data-transformer
 vim config.yaml
 ```
 
-### Step 2 — Start infrastructure (Elasticsearch + MinIO)
+### Step 2 — Start infrastructure (Elasticsearch + Kibana + MinIO)
 
 ```bash
 docker compose -f docker-compose.infra.yml up -d
 ```
 
-Wait for both services to become healthy:
+Wait for all three services to become healthy (Kibana takes ~90 seconds):
 
 ```bash
 docker compose -f docker-compose.infra.yml ps
-# Both services should show "(healthy)" status
+# All three services should show "(healthy)" status
 ```
 
 ### Step 3 — Build and start the transformer
@@ -270,8 +272,10 @@ docker compose -f docker-compose.cronjob.yml up -d
 docker logs iudx-transformer --tail 30
 
 # Browse uploaded Parquet files in MinIO
-# Open http://localhost:9001 in your browser
-# Login: minioadmin / minioadmin
+# Open http://localhost:9001  –  login: minioadmin / minioadmin
+
+# Browse and manage Elasticsearch indices in Kibana
+# Open http://localhost:5601  –  login: elastic / changeme
 ```
 
 ### Stopping services
@@ -411,4 +415,50 @@ vim config.yaml
 docker compose -f docker-compose.cronjob.yml restart transformer
 ```
 
-If you also change MinIO or Elasticsearch passwords, update both `config.yaml` and the corresponding environment variable in `docker-compose.infra.yml`, then recreate the infra stack.
+If you also change MinIO or Elasticsearch passwords, update both `config.yaml` and the corresponding environment variables in `docker-compose.infra.yml`, then recreate the infra stack.
+
+---
+
+## Kibana – Index Management
+
+Kibana is included in the infrastructure stack and provides a browser UI for managing and exploring Elasticsearch indices.
+
+**URL:** http://localhost:5601
+**Login:** `elastic` / `changeme`
+
+Kibana takes ~90 seconds to initialise after the infra stack starts. Use `docker compose -f docker-compose.infra.yml ps` to confirm it is `(healthy)` before opening the browser.
+
+### Useful Kibana pages
+
+| Task | Navigation path |
+|------|----------------|
+| View and manage indices | Stack Management → Index Management |
+| Browse documents in an index | Discover → select index pattern |
+| Run raw ES queries | Dev Tools → Console |
+| Monitor cluster health | Stack Management → Index Lifecycle Policies |
+
+### Create an index pattern to explore data
+
+1. Go to **Stack Management → Index Patterns**
+2. Click **Create index pattern**
+3. Enter the index name (e.g. `dataset-abc`) or a wildcard (e.g. `dataset-*`)
+4. Select the timestamp field (e.g. `observationDateTime`) if present
+5. Click **Create index pattern**
+6. Go to **Discover** and select the pattern to browse documents
+
+### Rotate Kibana credentials
+
+Kibana reads its credentials from the `ELASTICSEARCH_USERNAME` and `ELASTICSEARCH_PASSWORD` environment variables in `docker-compose.infra.yml`. Update them alongside the Elasticsearch password and recreate the infra stack:
+
+```bash
+# 1. Update ELASTIC_PASSWORD (ES) and ELASTICSEARCH_PASSWORD (Kibana) in docker-compose.infra.yml
+# 2. Also update elasticsearch.password in config.yaml
+vim docker-compose.infra.yml
+vim config.yaml
+
+# 3. Recreate infra services to apply new credentials
+docker compose -f docker-compose.infra.yml up -d --force-recreate
+
+# 4. Restart transformer to pick up the new config
+docker compose -f docker-compose.cronjob.yml restart transformer
+```
