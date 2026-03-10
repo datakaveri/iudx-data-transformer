@@ -38,9 +38,11 @@ class ESClient:
         """
         Expected config keys:
           host, port, scheme (http/https), username, password,
-          batch_size (optional, default 10000)
+          batch_size   (optional, default 10000)
+          index_prefix (optional, default "" = all user indices)
         """
         self._batch_size: int = int(config.get("batch_size", 10_000))
+        self._index_prefix: str = config.get("index_prefix", "")
 
         hosts = [{
             "host": config["host"],
@@ -62,7 +64,7 @@ class ESClient:
     # ------------------------------------------------------------------
 
     def get_dataset_indices(self) -> list[str]:
-        """Return all user-facing indices (excludes system indices)."""
+        """Return user-facing indices, filtered by index_prefix when configured."""
         try:
             all_indices = list(self._client.indices.get_alias().keys())
         except Exception as exc:
@@ -71,9 +73,16 @@ class ESClient:
 
         result = [
             idx for idx in all_indices
-            if not any(idx.startswith(prefix) for prefix in _SYSTEM_INDEX_PREFIXES)
+            if not any(idx.startswith(p) for p in _SYSTEM_INDEX_PREFIXES)
+            and idx.startswith(self._index_prefix)
         ]
-        logger.info("Found %d dataset indices.", len(result))
+
+        if self._index_prefix:
+            logger.info("Found %d dataset indices with prefix '%s'.",
+                        len(result), self._index_prefix)
+        else:
+            logger.info("Found %d dataset indices.", len(result))
+
         return sorted(result)
 
     def get_doc_count(self, index: str) -> int:
