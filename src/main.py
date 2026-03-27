@@ -146,7 +146,8 @@ def main() -> None:
 
     es = ESClient(cfg["elasticsearch"])
     storage = StorageClient(cfg["object_store"])
-    checkpoints = CheckpointManager(cfg["transformer"]["checkpoint_file"])
+    resume = bool(cfg["transformer"].get("resume_checkpoint", True))
+    checkpoints = CheckpointManager(cfg["transformer"]["checkpoint_file"], resume=resume)
 
     # Ensure destination bucket exists before scheduling
     storage.ensure_bucket()
