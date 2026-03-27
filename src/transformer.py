@@ -17,6 +17,7 @@ can stream it directly to the object store without touching the filesystem.
 import io
 import json
 import logging
+import re
 from typing import Any
 
 import pandas as pd
@@ -24,6 +25,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
+
+
+_ALPHANUMERIC_RE = re.compile(r"[^a-zA-Z0-9]")
+
+
+def _to_alphanumeric(value: Any) -> str:
+    """Convert a scalar to its string representation, keeping only alphanumeric characters."""
+    return _ALPHANUMERIC_RE.sub("", str(value))
 
 
 def _normalise_value(value: Any) -> Any:
@@ -55,6 +64,16 @@ def json_records_to_parquet(records: list[dict]) -> bytes:
     normalised = [_normalise_record(r) for r in records]
 
     df = pd.DataFrame(normalised)
+
+    # Coerce mixed-type object columns to alphanumeric strings to avoid pyarrow type
+    # conflicts. When a field holds different scalar types across records (e.g. int in
+    # one doc, str in another), pandas uses dtype=object and pyarrow fails to infer a
+    # single type. Values are stripped to [a-zA-Z0-9] to produce clean, uniform strings.
+    for col in df.columns:
+        if df[col].dtype == object:
+            non_null = df[col].dropna()
+            if non_null.apply(lambda x: not isinstance(x, str)).any():
+                df[col] = df[col].where(df[col].isna(), df[col].map(_to_alphanumeric))
 
     table = pa.Table.from_pandas(df, preserve_index=False)
 
