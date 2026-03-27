@@ -20,9 +20,13 @@ class CheckpointManager:
       - last_push: ISO timestamp of the last successful push
     """
 
-    def __init__(self, checkpoint_file: str) -> None:
+    def __init__(self, checkpoint_file: str, resume: bool = True) -> None:
         self.checkpoint_file = checkpoint_file
-        self._state: dict = self._load()
+        self._state: dict = self._load() if resume else {}
+        if not resume:
+            logger.info("resume_checkpoint=false – ignoring existing checkpoint file, starting fresh.")
+        # Always persist on startup so the file exists from the first run onward.
+        self._save()
 
     # ------------------------------------------------------------------
     # Persistence

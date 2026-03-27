@@ -38,3 +38,8 @@ transformer:
   # Persistent file that tracks the last-pushed document per index.
   # Mount a volume to this path so checkpoints survive container restarts.
   checkpoint_file: /data/checkpoints/state.json
+
+  # Set to false to ignore any existing checkpoint file on startup and reprocess
+  # all documents from the beginning. The file is always written going forward
+  # regardless of this setting.
+  resume_checkpoint: true

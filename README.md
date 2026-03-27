@@ -114,12 +114,19 @@ iudx-data-transformer/
     │                           Snappy-compressed Parquet bytes using
     │                           pandas + pyarrow. Nested objects/arrays
     │                           are JSON-serialised to string columns.
+    │                           Mixed-type scalar columns (e.g. a field
+    │                           that holds int in some docs and str in
+    │                           others) are coerced to alphanumeric
+    │                           strings to prevent pyarrow type errors.
     │
     └── checkpoint.py           Persists per-index state to a JSON file.
                                 State includes: search_after vector,
                                 doc count, and last successful push time.
                                 Uses atomic file replacement to prevent
-                                corruption on crash.
+                                corruption on crash. The file is always
+                                written on startup (even on a fresh run)
+                                and can be ignored at startup via the
+                                resume_checkpoint config flag.
 ```
 
 ---
@@ -193,6 +200,16 @@ transformer:
   # This path is backed by a Docker named volume so it survives restarts.
   # Do not change unless you also update the volume mount in
   # docker-compose.cronjob.yml.
+  # The file is always written on startup, so it exists from the first run.
+
+  resume_checkpoint: true
+  # Whether to resume from an existing checkpoint file on startup.
+  #   true  – read the checkpoint file and continue from where the last run
+  #           left off (default; safe for normal restarts and upgrades).
+  #   false – ignore any existing checkpoint file and reprocess all documents
+  #           from the beginning. The file is still written going forward, so
+  #           subsequent restarts will resume normally unless this is set to
+  #           false again.
 ```
 
 ### Connecting to external / existing Elasticsearch or S3
@@ -390,6 +407,22 @@ docker compose -f docker-compose.cronjob.yml up -d
 ```
 
 ### Reset all checkpoints (full re-export of everything)
+
+The simplest approach is to set `resume_checkpoint: false` in `config.yaml` and restart:
+
+```bash
+# 1. Set resume_checkpoint: false in config.yaml
+vim config.yaml
+
+# 2. Restart — the transformer will reprocess all documents from scratch
+docker compose -f docker-compose.cronjob.yml restart transformer
+
+# 3. Once the run completes, set resume_checkpoint: true to resume normally
+vim config.yaml
+docker compose -f docker-compose.cronjob.yml restart transformer
+```
+
+Alternatively, delete the checkpoint volume entirely:
 
 ```bash
 docker compose -f docker-compose.cronjob.yml down
