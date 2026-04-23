@@ -23,6 +23,7 @@ If the index has not grown since the last run, an empty list is returned.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from elasticsearch import Elasticsearch, NotFoundError
@@ -155,6 +156,39 @@ class ESClient:
         # Sort by _seq_no (insertion order) so that search_after tracks
         # when documents were indexed, not their content timestamps.
         return [{"_seq_no": "asc"}]
+
+    # ------------------------------------------------------------------
+    # Catalogue
+    # ------------------------------------------------------------------
+
+    def update_catalogue_last_updated(self, index_id: str) -> None:
+        """Set lastUpdated to now on the catalogue document whose _id matches index_id.
+
+        Strips any infrastructure prefix (e.g. 'iudx__') before the lookup so
+        that the catalogue document id remains the raw dataset UUID regardless
+        of how the ES index is named.
+        """
+        catalogue_id = index_id.split("__", 1)[-1]
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+        try:
+            self._client.update(
+                index="catalogue",
+                id=catalogue_id,
+                body={"doc": {"lastUpdated": now}},
+            )
+            logger.info(
+                "Catalogue lastUpdated → index='%s' catalogue_id='%s' ts=%s",
+                index_id, catalogue_id, now,
+            )
+        except NotFoundError:
+            logger.debug(
+                "No catalogue document for '%s' – skipping lastUpdated update.",
+                catalogue_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update catalogue lastUpdated for '%s': %s", catalogue_id, exc
+            )
 
     def close(self) -> None:
         self._client.close()

@@ -129,6 +129,9 @@ def _process_index(
     #       If the upload fails, the next run will re-fetch and retry.
     storage.upload_parquet(dataset_id=index, data=parquet_bytes)
 
+    # ---- update catalogue lastUpdated ------------------------------------
+    es.update_catalogue_last_updated(index)
+
     # ---- update checkpoint -----------------------------------------------
     checkpoints.update(
         index=index,
