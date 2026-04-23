@@ -22,6 +22,10 @@ elasticsearch:
   # Number of documents fetched per ES scroll page (tune for memory vs. speed)
   batch_size: 10000
 
+  # Index that holds catalogue metadata documents (one doc per dataset UUID).
+  # lastUpdated is written here after each successful Parquet upload.
+  catalogue_index: catalogue
+
 # ---- Object Store (S3 / MinIO) ----------------------------------------------
 object_store:
   endpoint_url: http://minio:9000   # MinIO service name or S3 endpoint
