@@ -44,6 +44,7 @@ class ESClient:
         """
         self._batch_size: int = int(config.get("batch_size", 10_000))
         self._index_prefix: str = config.get("index_prefix", "")
+        self._catalogue_index: str = config.get("catalogue_index", "catalogue")
 
         hosts = [{
             "host": config["host"],
@@ -172,7 +173,7 @@ class ESClient:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
         try:
             self._client.update(
-                index="catalogue",
+                index=self._catalogue_index,
                 id=catalogue_id,
                 body={"doc": {"lastUpdated": now}},
             )
