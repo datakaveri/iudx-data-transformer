@@ -28,6 +28,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from checkpoint import CheckpointManager
 from es_client import ESClient
+from redis_client import RedisClient
 from storage_client import StorageClient
 from transformer import json_records_to_parquet
 
@@ -65,6 +66,7 @@ def run_transformation(
     es: ESClient,
     storage: StorageClient,
     checkpoints: CheckpointManager,
+    redis: RedisClient,
 ) -> None:
     """Single execution of the ETL cycle across all ES indices."""
     logger.info("=== Transformation run started ===")
@@ -79,7 +81,7 @@ def run_transformation(
 
     for index in indices:
         try:
-            _process_index(index, es, storage, checkpoints)
+            _process_index(index, es, storage, checkpoints, redis)
             pushed += 1
         except _NoNewData:
             skipped += 1
@@ -102,6 +104,7 @@ def _process_index(
     es: ESClient,
     storage: StorageClient,
     checkpoints: CheckpointManager,
+    redis: RedisClient,
 ) -> None:
     search_after = checkpoints.get_search_after(index)
     prev_count = checkpoints.get_doc_count(index)
@@ -129,6 +132,12 @@ def _process_index(
     #       If the upload fails, the next run will re-fetch and retry.
     storage.upload_parquet(dataset_id=index, data=parquet_bytes)
 
+    # ---- notify Redis readiness queue ------------------------------------
+    # Strip infrastructure prefix (e.g. 'iudx__') to get the bare dataset UUID,
+    # matching the same extraction used by es_client.update_catalogue_last_updated.
+    databank_id = index.split("__", 1)[-1]
+    redis.push_readiness_message(databank_id=databank_id)
+
     # ---- update catalogue lastUpdated ------------------------------------
     es.update_catalogue_last_updated(index)
 
@@ -149,6 +158,7 @@ def main() -> None:
 
     es = ESClient(cfg["elasticsearch"])
     storage = StorageClient(cfg["object_store"])
+    redis = RedisClient(cfg["redis"])
     resume = bool(cfg["transformer"].get("resume_checkpoint", True))
     checkpoints = CheckpointManager(cfg["transformer"]["checkpoint_file"], resume=resume)
 
@@ -159,13 +169,13 @@ def main() -> None:
     logger.info("Scheduler configured – interval=%d minutes.", interval_minutes)
 
     # Run once immediately on startup, then on schedule
-    run_transformation(es, storage, checkpoints)
+    run_transformation(es, storage, checkpoints, redis)
 
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_job(
         func=run_transformation,
         trigger=IntervalTrigger(minutes=interval_minutes),
-        kwargs={"es": es, "storage": storage, "checkpoints": checkpoints},
+        kwargs={"es": es, "storage": storage, "checkpoints": checkpoints, "redis": redis},
         id="data_transformer",
         name="ES → Parquet → Object Store",
         max_instances=1,          # prevent overlapping runs
@@ -178,6 +188,7 @@ def main() -> None:
         logger.info("Scheduler stopped.")
     finally:
         es.close()
+        redis.close()
 
 
 if __name__ == "__main__":

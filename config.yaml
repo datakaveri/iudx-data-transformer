@@ -34,6 +34,15 @@ object_store:
   bucket: parquet-files-bucket      # bucket is auto-created if it does not exist
   region: us-east-1                 # ignored by MinIO but required by boto3
 
+# ---- Redis ------------------------------------------------------------------
+redis:
+  host: redis                  # service name inside docker network (or IP/FQDN)
+  port: 6379
+  password: ""                 # leave empty for no-auth Redis
+
+  # Queue to which a readiness message is appended after each Parquet upload.
+  readiness_queue_name: jobs:report
+
 # ---- Transformer Behaviour --------------------------------------------------
 transformer:
   # How often the job runs (in minutes)
