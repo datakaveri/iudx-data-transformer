@@ -1,6 +1,6 @@
 # IUDX Data Transformer
 
-Incrementally exports JSON documents from Elasticsearch to Parquet files in an S3-compatible object store (MinIO). Runs on a configurable schedule (default: every 15 minutes). Only new documents since the last run are exported — no duplicates.
+Incrementally exports JSON documents from Elasticsearch to Parquet files in an S3-compatible object store (MinIO). After each upload, a readiness message is pushed to a Redis queue so downstream consumers can act immediately. Runs on a configurable schedule (default: every 15 minutes). Only new documents since the last run are exported — no duplicates.
 
 ---
 
@@ -33,10 +33,14 @@ Incrementally exports JSON documents from Elasticsearch to Parquet files in an S
 │  └─────────────────┘  │     │     :9001 (Web console)      │        │
 │                        │     └──────────────┬───────────────┘        │
 │                        │  ┌─────────────┐   │                        │
-│                        └──► Transformer ├───┘                        │
+│                        └──► Transformer ├───┘  upload                │
 │                           │  (cron job) │                            │
-│                           └──────┬──────┘                            │
-│                                  │                                    │
+│                           └──────┬──────┴──────────────────────┐     │
+│                                  │              RPUSH           │     │
+│                                  │      ┌───────────────────┐   │     │
+│                                  │      │   Redis  :6379    │◄──┘     │
+│                                  │      │  jobs:report      │         │
+│                                  │      └───────────────────┘         │
 └──────────────────────────────────┼────────────────────────────────────┘
                                    │ /data/checkpoints/state.json
                               (named volume)
@@ -48,26 +52,47 @@ Incrementally exports JSON documents from Elasticsearch to Parquet files in an S
 For each Elasticsearch index (= dataset id):
   │
   ├─ 1. GET /_count  →  compare with stored count
-  │       └─ count unchanged? → SKIP (no upload)
+  │       └─ count unchanged? → SKIP (no upload, no Redis message)
   │
   ├─ 2. search_after query from last checkpoint
-  │       └─ 0 results? → SKIP (no upload)
+  │       └─ 0 results? → SKIP (no upload, no Redis message)
   │
   ├─ 3. Convert JSON records → Snappy-compressed Parquet
   │
   ├─ 4. Upload to  s3://<bucket>/<index-name>/<timestamp>_<uid>.parquet
   │
-  └─ 5. Persist new checkpoint (search_after vector + doc count)
+  ├─ 5. RPUSH readiness message → Redis  jobs:report
+  │       { jobId, type: "report", databankId, options: {}, createdAt }
+  │
+  ├─ 6. Update catalogue lastUpdated in Elasticsearch
+  │
+  └─ 7. Persist new checkpoint (search_after vector + doc count)
 ```
+
+Steps 5–7 only execute after a confirmed successful upload.  If the upload fails, the next run re-fetches the same documents and retries — no partial state is written.
+
+### Readiness message payload
+
+```json
+{
+  "jobId":      "31d8ef25-376b-4926-a162-9d9a1062e8da",
+  "type":       "report",
+  "databankId": "0c042065-9e7f-4fd2-8ca5-296d358dccc2",
+  "options":    {},
+  "createdAt":  "2026-05-02T02:46:31.000Z"
+}
+```
+
+`databankId` is the bare dataset UUID — the `iudx__` infrastructure prefix is stripped so it matches the identifier used in the catalogue.
 
 ### Object store layout
 
 ```
-iudx-data/                                     ← bucket
-  ├── dataset-abc/
+parquet-files-bucket/                          ← bucket
+  ├── iudx__0c042065-.../
   │   ├── 2026-03-04T09-00-01_a1b2c3d4.parquet
   │   └── 2026-03-04T09-15-02_e5f6g7h8.parquet
-  └── dataset-xyz/
+  └── iudx__63169a21-.../
       └── 2026-03-04T09-00-05_i9j0k1l2.parquet
 ```
 
@@ -80,7 +105,7 @@ Each file contains only the documents that arrived between two consecutive runs.
 ```
 iudx-data-transformer/
 │
-├── docker-compose.infra.yml    Infrastructure: Elasticsearch + Kibana + MinIO
+├── docker-compose.infra.yml    Infrastructure: Elasticsearch + Kibana + MinIO + Redis
 │                               Owns the shared Docker network (iudx-net)
 │                               and named data volumes.
 │
@@ -104,29 +129,32 @@ iudx-data-transformer/
     │                           - Lists all user-facing indices
     │                           - Fetches documents incrementally using
     │                             search_after pagination
+    │                           - Updates catalogue lastUpdated after upload
     │
     ├── storage_client.py       MinIO / S3 wrapper (boto3).
     │                           - Auto-creates the bucket if missing
     │                           - Uploads Parquet bytes under
     │                             <dataset_id>/<timestamp>_<uid>.parquet
     │
+    ├── redis_client.py         Redis readiness publisher.
+    │                           - Connects to the configured Redis instance
+    │                           - After each successful upload, appends a JSON
+    │                             readiness message to jobs:report via RPUSH
+    │                           - databankId uses the bare dataset UUID
+    │                             (iudx__ prefix stripped)
+    │
     ├── transformer.py          Converts a list of JSON dicts to
     │                           Snappy-compressed Parquet bytes using
     │                           pandas + pyarrow. Nested objects/arrays
     │                           are JSON-serialised to string columns.
-    │                           Mixed-type scalar columns (e.g. a field
-    │                           that holds int in some docs and str in
-    │                           others) are coerced to alphanumeric
-    │                           strings to prevent pyarrow type errors.
+    │                           Mixed-type scalar columns are coerced to
+    │                           alphanumeric strings to prevent type errors.
     │
     └── checkpoint.py           Persists per-index state to a JSON file.
                                 State includes: search_after vector,
                                 doc count, and last successful push time.
                                 Uses atomic file replacement to prevent
-                                corruption on crash. The file is always
-                                written on startup (even on a fresh run)
-                                and can be ignored at startup via the
-                                resume_checkpoint config flag.
+                                corruption on crash.
 ```
 
 ---
@@ -136,13 +164,13 @@ iudx-data-transformer/
 Two independent guards run on every cycle per index:
 
 **Guard 1 – Document count check (fast path)**
-The transformer stores the total document count of each index after every successful push. At the start of each run it queries `GET /<index>/_count`. If the count has not grown, the index is skipped immediately — no documents are fetched.
+The transformer stores the total document count of each index after every successful push. At the start of each run it queries `GET /<index>/_count`. If the count has not grown, the index is skipped immediately — no documents are fetched and no Redis message is sent.
 
 **Guard 2 – `search_after` pagination (precise boundary)**
-Documents are sorted by `[sort_field ASC, _id ASC]`. After a successful push, the sort-key vector of the last document is saved as the checkpoint. On the next run, passing this vector as `search_after` instructs Elasticsearch to return only documents that sort *after* the checkpoint. This is ES-native and produces zero overlap.
+Documents are sorted by `_seq_no` (insertion order). After a successful push, the sort-key vector of the last document is saved as the checkpoint. On the next run, passing this vector as `search_after` instructs Elasticsearch to return only documents that sort *after* the checkpoint. This is ES-native and produces zero overlap.
 
 **Safe retry on upload failure**
-The checkpoint is updated *only after* a successful upload. If MinIO is temporarily unreachable, the next scheduled run re-fetches the same documents and retries the upload automatically.
+The checkpoint, Redis message, and catalogue update are all written *only after* a successful upload. If MinIO is temporarily unreachable, the next scheduled run re-fetches the same documents and retries automatically.
 
 ---
 
@@ -160,16 +188,19 @@ elasticsearch:
   username: elastic       # ES username
   password: changeme      # ES password
 
-  sort_field: "observationDateTime"
-  # Name of the timestamp field used to order documents for incremental fetch.
-  # Must be present in all documents of every index.
-  # Set to "" (empty string) to fall back to _id-based ordering.
-  # Tip: for IUDX data this is typically "observationDateTime".
+  index_prefix: ""
+  # Optional: only process indices whose names start with this prefix.
+  # Leave empty to process all user-facing indices.
+  # Example: "iudx__" will match iudx__<UUID> indices only.
 
   batch_size: 10000
   # Number of documents fetched per Elasticsearch page.
   # Lower this if the transformer runs out of memory on large documents.
   # Raise it to reduce the number of round-trips for large datasets.
+
+  catalogue_index: catalogue
+  # Index that holds catalogue metadata documents (one doc per dataset UUID).
+  # lastUpdated is written here after each successful Parquet upload.
 ```
 
 ### Object Store (MinIO / S3)
@@ -183,8 +214,22 @@ object_store:
 
   access_key: minioadmin  # S3 access key / MinIO root user
   secret_key: minioadmin  # S3 secret key / MinIO root password
-  bucket: iudx-data       # Destination bucket (auto-created if missing)
+  bucket: parquet-files-bucket  # Destination bucket (auto-created if missing)
   region: us-east-1       # AWS region; ignored by MinIO but required by boto3
+```
+
+### Redis
+
+```yaml
+redis:
+  host: redis             # Hostname or IP of the Redis node
+  port: 6379              # Redis port
+  password: ""            # Leave empty for no-auth Redis
+
+  readiness_queue_name: jobs:report
+  # List key to which a readiness message is appended (RPUSH) after each
+  # successful Parquet upload. Downstream consumers can BLPOP this queue
+  # to trigger processing without polling.
 ```
 
 ### Transformer Behaviour
@@ -198,9 +243,6 @@ transformer:
   checkpoint_file: /data/checkpoints/state.json
   # Path inside the container where checkpoint state is stored.
   # This path is backed by a Docker named volume so it survives restarts.
-  # Do not change unless you also update the volume mount in
-  # docker-compose.cronjob.yml.
-  # The file is always written on startup, so it exists from the first run.
 
   resume_checkpoint: true
   # Whether to resume from an existing checkpoint file on startup.
@@ -208,16 +250,15 @@ transformer:
   #           left off (default; safe for normal restarts and upgrades).
   #   false – ignore any existing checkpoint file and reprocess all documents
   #           from the beginning. The file is still written going forward, so
-  #           subsequent restarts will resume normally unless this is set to
-  #           false again.
+  #           subsequent restarts will resume normally unless this is false again.
 ```
 
-### Connecting to external / existing Elasticsearch or S3
+### Connecting to external / existing infrastructure
 
 To point the transformer at infrastructure you already operate, edit `config.yaml` before starting the cronjob stack:
 
 ```yaml
-# Example: AWS OpenSearch + AWS S3
+# Example: AWS OpenSearch + AWS S3 + external Redis
 elasticsearch:
   host: my-domain.us-east-1.es.amazonaws.com
   port: 443
@@ -231,6 +272,12 @@ object_store:
   secret_key: <your-secret>
   bucket: my-iudx-bucket
   region: ap-south-1
+
+redis:
+  host: my-redis.internal
+  port: 6379
+  password: <your-redis-password>
+  readiness_queue_name: jobs:report
 ```
 
 Then start **only** the cronjob stack (skip `docker-compose.infra.yml`):
@@ -259,17 +306,17 @@ cd iudx-data-transformer
 vim config.yaml
 ```
 
-### Step 2 — Start infrastructure (Elasticsearch + Kibana + MinIO)
+### Step 2 — Start infrastructure (Elasticsearch + Kibana + MinIO + Redis)
 
 ```bash
 docker compose -f docker-compose.infra.yml up -d
 ```
 
-Wait for all three services to become healthy (Kibana takes ~90 seconds):
+Wait for all services to become healthy (Kibana takes ~90 seconds):
 
 ```bash
 docker compose -f docker-compose.infra.yml ps
-# All three services should show "(healthy)" status
+# All services should show "(healthy)" status
 ```
 
 ### Step 3 — Build and start the transformer
@@ -287,6 +334,9 @@ docker compose -f docker-compose.cronjob.yml up -d
 ```bash
 # Check the transformer started correctly
 docker logs iudx-transformer --tail 30
+
+# Confirm readiness messages are being queued
+docker exec iudx-redis redis-cli LRANGE jobs:report 0 -1
 
 # Browse uploaded Parquet files in MinIO
 # Open http://localhost:9001  –  login: minioadmin / minioadmin
@@ -346,25 +396,30 @@ docker logs -f iudx-transformer 2>&1 | grep "Run complete"
 
 # Show upload events
 docker logs -f iudx-transformer 2>&1 | grep "Uploaded"
+
+# Show Redis readiness pushes
+docker logs -f iudx-transformer 2>&1 | grep "Pushed readiness"
 ```
 
 ### Typical log output
 
 ```
-2026-03-04T09:00:00 INFO     transformer.main – Configuration loaded from /app/config.yaml
-2026-03-04T09:00:00 INFO     transformer.main – Scheduler configured – interval=15 minutes.
-2026-03-04T09:00:00 INFO     transformer.main – === Transformation run started ===
-2026-03-04T09:00:01 INFO     transformer.es_client – Found 4 dataset indices.
-2026-03-04T09:00:01 INFO     transformer.main – Index 'dataset-abc': 320 new document(s) to push.
-2026-03-04T09:00:02 INFO     transformer.storage – Uploaded 45231 bytes → s3://iudx-data/dataset-abc/2026-03-04T09-00-02_a1b2c3d4.parquet
-2026-03-04T09:00:02 INFO     transformer.main – Index 'dataset-xyz': no new documents (count=1500) – skipping.
-2026-03-04T09:00:02 INFO     transformer.main – === Run complete – pushed=1  skipped=3  failed=0 ===
+2026-03-04T09:00:00 INFO     transformer.main  – Configuration loaded from /app/config.yaml
+2026-03-04T09:00:00 INFO     transformer.redis – Redis client initialised – host=redis port=6379 queue=jobs:report
+2026-03-04T09:00:00 INFO     transformer.main  – Scheduler configured – interval=15 minutes.
+2026-03-04T09:00:00 INFO     transformer.main  – === Transformation run started ===
+2026-03-04T09:00:01 INFO     es_client         – Found 4 dataset indices.
+2026-03-04T09:00:01 INFO     transformer.main  – Index 'iudx__0c042065-...': 320 new document(s) to push.
+2026-03-04T09:00:02 INFO     storage_client    – Uploaded 45231 bytes → s3://parquet-files-bucket/iudx__0c042065-.../2026-03-04T09-00-02_a1b2c3d4.parquet
+2026-03-04T09:00:02 INFO     transformer.redis – Pushed readiness message to 'jobs:report' for databankId='0c042065-...' (jobId=31d8ef25-...)
+2026-03-04T09:00:02 INFO     es_client         – Catalogue lastUpdated → index='iudx__0c042065-...' catalogue_id='0c042065-...' ts=2026-03-04T09:00:02+0000
+2026-03-04T09:00:02 INFO     transformer.main  – Index 'iudx__63169a21-...': no new documents (count=1500) – skipping.
+2026-03-04T09:00:02 INFO     transformer.main  – === Run complete – pushed=1  skipped=3  failed=0 ===
 ```
 
 ### Inspect the checkpoint state
 
 ```bash
-# Print current checkpoint state
 docker run --rm \
   -v iudx-data-transformer_transformer-checkpoints:/data \
   alpine cat /data/checkpoints/state.json
@@ -374,14 +429,14 @@ Example output:
 
 ```json
 {
-  "dataset-abc": {
-    "search_after": ["2026-03-04T08:59:55.000Z", "doc_id_8821"],
-    "doc_count": 4820,
-    "last_push": "2026-03-04T09:00:02.341Z"
+  "iudx__0c042065-9e7f-4fd2-8ca5-296d358dccc2": {
+    "search_after": [260],
+    "doc_count": 261,
+    "last_push": "2026-05-02T02:46:31.000Z"
   },
-  "dataset-xyz": {
-    "search_after": ["2026-03-04T08:44:10.000Z", "doc_id_1500"],
-    "doc_count": 1500,
+  "iudx__63169a21-2b32-4cb9-b582-24c4085ffd3f": {
+    "search_after": [218],
+    "doc_count": 218,
     "last_push": "2026-03-04T08:45:01.112Z"
   }
 }
@@ -390,6 +445,25 @@ Example output:
 ---
 
 ## Operations Runbook
+
+### Inspect the Redis readiness queue
+
+```bash
+# Count pending messages
+docker exec iudx-redis redis-cli LLEN jobs:report
+
+# View all messages (newest at tail)
+docker exec iudx-redis redis-cli LRANGE jobs:report 0 -1
+
+# Pop the next message (as a consumer would)
+docker exec iudx-redis redis-cli LPOP jobs:report
+```
+
+### Clear the Redis queue
+
+```bash
+docker exec iudx-redis redis-cli DEL jobs:report
+```
 
 ### Reset the checkpoint for one index (force full re-export)
 
@@ -474,7 +548,7 @@ Kibana takes ~90 seconds to initialise after the infra stack starts. Use `docker
 
 1. Go to **Stack Management → Index Patterns**
 2. Click **Create index pattern**
-3. Enter the index name (e.g. `dataset-abc`) or a wildcard (e.g. `dataset-*`)
+3. Enter the index name (e.g. `iudx__0c042065-*`) or a wildcard (e.g. `iudx__*`)
 4. Select the timestamp field (e.g. `observationDateTime`) if present
 5. Click **Create index pattern**
 6. Go to **Discover** and select the pattern to browse documents
