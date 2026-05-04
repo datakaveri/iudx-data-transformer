@@ -38,6 +38,8 @@ object_store:
 redis:
   host: redis                  # service name inside docker network (or IP/FQDN)
   port: 6379
+  db: 0                        # Redis logical database index
+  username: ""                 # leave empty if ACL auth is not configured
   password: ""                 # leave empty for no-auth Redis
 
   # Queue to which a readiness message is appended after each Parquet upload.

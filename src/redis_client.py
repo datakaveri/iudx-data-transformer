@@ -10,16 +10,18 @@ logger = logging.getLogger("transformer.redis")
 
 class RedisClient:
     def __init__(self, cfg: dict) -> None:
-        self._queue = cfg.get("readiness_queue_name", "jobs:report")
+        self._queue = cfg["readiness_queue_name"]
         self._client = redis.Redis(
-            host=cfg.get("host", "redis"),
-            port=int(cfg.get("port", 6379)),
+            host=cfg["host"],
+            port=int(cfg["port"]),
+            db=int(cfg.get("db", 0)),
+            username=cfg.get("username") or None,
             password=cfg.get("password") or None,
             decode_responses=True,
         )
         logger.info(
-            "Redis client initialised – host=%s port=%s queue=%s",
-            cfg.get("host"), cfg.get("port"), self._queue,
+            "Redis client initialised – host=%s port=%s db=%s queue=%s",
+            cfg["host"], cfg["port"], cfg.get("db", 0), self._queue,
         )
 
     def push_readiness_message(self, databank_id: str) -> None:
