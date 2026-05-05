@@ -30,7 +30,7 @@ from checkpoint import CheckpointManager
 from es_client import ESClient
 from redis_client import RedisClient
 from storage_client import StorageClient
-from transformer import json_records_to_parquet
+from transformer import json_records_batches_to_parquet
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -115,22 +115,24 @@ def _process_index(
         logger.info("Index '%s': no new documents (count=%d) – skipping.", index, current_count)
         raise _NoNewData
 
-    # ---- incremental fetch ----------------------------------------------
-    records, last_sort = es.fetch_new_documents(index, search_after=search_after)
+    # ---- fetch → transform → upload one batch at a time -----------------
+    # Each batch is converted to Parquet and uploaded immediately so peak
+    # memory is bounded to a single ES page rather than the full index.
+    # The checkpoint advances after every successful upload, so a crash
+    # mid-index resumes from the last completed batch on the next run.
+    total_docs = 0
 
-    if not records:
+    for batch, sort in es.iter_new_documents(index, search_after=search_after):
+        parquet_bytes = json_records_batches_to_parquet([batch])
+        storage.upload_parquet(dataset_id=index, data=parquet_bytes)
+        checkpoints.update(index=index, search_after=sort, doc_count=current_count)
+        total_docs += len(batch)
+
+    if total_docs == 0:
         logger.info("Index '%s': search_after returned 0 docs – skipping.", index)
         raise _NoNewData
 
-    logger.info("Index '%s': %d new document(s) to push.", index, len(records))
-
-    # ---- transform -------------------------------------------------------
-    parquet_bytes = json_records_to_parquet(records)
-
-    # ---- upload ----------------------------------------------------------
-    # NOTE: checkpoint is updated only after a successful upload.
-    #       If the upload fails, the next run will re-fetch and retry.
-    storage.upload_parquet(dataset_id=index, data=parquet_bytes)
+    logger.info("Index '%s': %d new document(s) pushed.", index, total_docs)
 
     # ---- notify Redis readiness queue ------------------------------------
     # Strip infrastructure prefix (e.g. 'iudx__') to get the bare dataset UUID,
@@ -141,13 +143,6 @@ def _process_index(
 
     # ---- update catalogue lastUpdated ------------------------------------
     es.update_catalogue_last_updated(index)
-
-    # ---- update checkpoint -----------------------------------------------
-    checkpoints.update(
-        index=index,
-        search_after=last_sort,
-        doc_count=current_count,
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ import io
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Iterable
 
 import pandas as pd
 import pyarrow as pa
@@ -31,7 +31,6 @@ _ALPHANUMERIC_RE = re.compile(r"[^a-zA-Z0-9]")
 
 
 def _to_alphanumeric(value: Any) -> str:
-    """Convert a scalar to its string representation, keeping only alphanumeric characters."""
     return _ALPHANUMERIC_RE.sub("", str(value))
 
 
@@ -46,50 +45,78 @@ def _normalise_record(record: dict) -> dict:
     return {k: _normalise_value(v) for k, v in record.items()}
 
 
-def json_records_to_parquet(records: list[dict]) -> bytes:
-    """
-    Convert a list of JSON records to Snappy-compressed Parquet bytes.
-
-    Parameters
-    ----------
-    records : list of dicts (each dict is one ES _source document)
-
-    Returns
-    -------
-    bytes – raw Parquet file content
-    """
-    if not records:
-        raise ValueError("Cannot create Parquet file from an empty record set.")
-
-    normalised = [_normalise_record(r) for r in records]
-
-    df = pd.DataFrame(normalised)
-
-    # Coerce mixed-type object columns to alphanumeric strings to avoid pyarrow type
-    # conflicts. When a field holds different scalar types across records (e.g. int in
-    # one doc, str in another), pandas uses dtype=object and pyarrow fails to infer a
-    # single type. Values are stripped to [a-zA-Z0-9] to produce clean, uniform strings.
+def _coerce_mixed_columns(df: pd.DataFrame) -> None:
+    """In-place: cast mixed-type object columns to alphanumeric strings."""
     for col in df.columns:
         if df[col].dtype == object:
             non_null = df[col].dropna()
             if non_null.apply(lambda x: not isinstance(x, str)).any():
                 df[col] = df[col].where(df[col].isna(), df[col].map(_to_alphanumeric))
 
-    table = pa.Table.from_pandas(df, preserve_index=False)
 
+def _align_table(table: pa.Table, schema: pa.Schema) -> pa.Table:
+    """Align a batch table to an established schema.
+
+    Columns missing from the batch are added as nulls; type mismatches are
+    cast to the target type, falling back to string on failure.
+    """
+    arrays = []
+    for field in schema:
+        if field.name in table.schema.names:
+            col = table.column(field.name)
+            if col.type != field.type:
+                try:
+                    col = col.cast(field.type)
+                except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                    col = col.cast(pa.string())
+            arrays.append(col)
+        else:
+            arrays.append(pa.array([None] * len(table), type=field.type))
+    return pa.table(dict(zip(schema.names, arrays)))
+
+
+def json_records_batches_to_parquet(batches: Iterable[list[dict]]) -> bytes:
+    """Stream batches of JSON records into a single Snappy-compressed Parquet file.
+
+    Only one batch is materialised in memory at a time, so this handles
+    arbitrarily large datasets without OOM risk.
+
+    The schema is fixed from the first non-empty batch; subsequent batches are
+    aligned to it (missing columns become nulls, type mismatches are cast).
+    """
     buf = io.BytesIO()
-    pq.write_table(
-        table,
-        buf,
-        compression="snappy",
-        coerce_timestamps="ms",
-        allow_truncated_timestamps=True,
-    )
+    writer: pq.ParquetWriter | None = None
+    schema: pa.Schema | None = None
+    total_rows = 0
+
+    for batch in batches:
+        if not batch:
+            continue
+
+        normalised = [_normalise_record(r) for r in batch]
+        df = pd.DataFrame(normalised)
+        _coerce_mixed_columns(df)
+        table = pa.Table.from_pandas(df, preserve_index=False)
+
+        if writer is None:
+            schema = table.schema
+            writer = pq.ParquetWriter(
+                buf, schema,
+                compression="snappy",
+                coerce_timestamps="ms",
+                allow_truncated_timestamps=True,
+            )
+        else:
+            table = _align_table(table, schema)
+
+        writer.write_table(table)
+        total_rows += len(table)
+
+    if writer is None:
+        raise ValueError("Cannot create Parquet file from an empty record set.")
+
+    writer.close()
     buf.seek(0)
     data = buf.read()
-
-    logger.debug(
-        "Converted %d records to Parquet (%d bytes, %d columns)",
-        len(records), len(data), len(table.schema),
-    )
+    logger.debug("Wrote %d rows to Parquet (%d bytes)", total_rows, len(data))
     return data

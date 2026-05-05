@@ -97,20 +97,22 @@ class ESClient:
     # Incremental fetch
     # ------------------------------------------------------------------
 
-    def fetch_new_documents(
+    def iter_new_documents(
         self,
         index: str,
         search_after: Optional[list] = None,
-    ) -> tuple[list[dict], Optional[list]]:
+    ):
         """
-        Fetch all documents after *search_after* using paginated search_after.
+        Generator: yields (batch, last_sort) one ES page at a time.
 
-        Returns
-        -------
-        (records, last_sort_value)
-          records          – list of _source dicts (empty if nothing new)
-          last_sort_value  – sort key of the last returned document, or the
-                             original *search_after* if nothing was returned
+        Only one page of _source dicts is held in memory at once, so the
+        caller can stream large indices without accumulating all documents.
+
+        Yields
+        ------
+        (batch, last_sort)
+          batch      – list of _source dicts for this page
+          last_sort  – sort key of the last document in this page
         """
         sort = self._build_sort()
         body: dict[str, Any] = {
@@ -123,9 +125,6 @@ class ESClient:
         if search_after:
             body["search_after"] = search_after
 
-        all_docs: list[dict] = []
-        current_sort = search_after
-
         while True:
             try:
                 response = self._client.search(index=index, body=body)
@@ -137,17 +136,13 @@ class ESClient:
             if not hits:
                 break
 
-            all_docs.extend(hit["_source"] for hit in hits)
-            current_sort = hits[-1]["sort"]
-            body["search_after"] = current_sort
+            last_sort = hits[-1]["sort"]
+            yield [hit["_source"] for hit in hits], last_sort
+
+            body["search_after"] = last_sort
 
             if len(hits) < self._batch_size:
                 break  # last page
-
-        logger.debug(
-            "fetch_new_documents('%s'): returned %d new docs", index, len(all_docs)
-        )
-        return all_docs, current_sort
 
     # ------------------------------------------------------------------
     # Helpers
