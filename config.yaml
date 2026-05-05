@@ -19,8 +19,9 @@ elasticsearch:
   # Example: "iudx-" will match iudx-weather, iudx-soil-report, etc.
   index_prefix: ""
 
-  # Number of documents fetched per ES scroll page (tune for memory vs. speed)
-  batch_size: 10000
+  # Number of documents fetched per ES page (tune for memory vs. speed).
+  # Lower values reduce peak memory; 1000 is a safe default for large indices.
+  batch_size: 1000
 
   # Index that holds catalogue metadata documents (one doc per dataset UUID).
   # lastUpdated is written here after each successful Parquet upload.
