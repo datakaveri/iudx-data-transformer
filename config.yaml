@@ -38,6 +38,7 @@ object_store:
 redis:
   host: redis                  # service name inside docker network (or IP/FQDN)
   port: 6379
+  cluster_mode: false          # set to true when connecting to a Redis Cluster
   username: ""                 # leave empty if ACL auth is not configured
   password: ""                 # leave empty for no-auth Redis
 

@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 import redis
+from redis.cluster import RedisCluster, ClusterNode
 
 logger = logging.getLogger("transformer.redis")
 
@@ -13,16 +14,27 @@ class RedisClient:
         prefix = cfg.get("key_prefix", "")
         self._queue = f"{prefix}{cfg['readiness_queue_name']}"
         self._zip_queue = f"{prefix}{cfg['zip_queue_name']}"
-        self._client = redis.Redis(
-            host=cfg["host"],
-            port=int(cfg["port"]),
+
+        host, port = cfg["host"], int(cfg["port"])
+        kwargs = dict(
             username=cfg.get("username") or None,
             password=cfg.get("password") or None,
             decode_responses=True,
         )
+
+        if cfg.get("cluster_mode", False):
+            self._client = RedisCluster(
+                startup_nodes=[ClusterNode(host, port)],
+                **kwargs,
+            )
+            mode = "cluster"
+        else:
+            self._client = redis.Redis(host=host, port=port, **kwargs)
+            mode = "standalone"
+
         logger.info(
-            "Redis client initialised – host=%s port=%s prefix=%r queue=%s zip_queue=%s",
-            cfg["host"], cfg["port"], prefix, self._queue, self._zip_queue,
+            "Redis client initialised – mode=%s host=%s port=%s prefix=%r queue=%s zip_queue=%s",
+            mode, host, port, prefix, self._queue, self._zip_queue,
         )
 
     def push_readiness_message(self, databank_id: str) -> None:
