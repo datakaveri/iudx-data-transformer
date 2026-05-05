@@ -38,9 +38,14 @@ object_store:
 redis:
   host: redis                  # service name inside docker network (or IP/FQDN)
   port: 6379
-  db: 0                        # Redis logical database index
+  cluster_mode: false          # set to true when connecting to a Redis Cluster
   username: ""                 # leave empty if ACL auth is not configured
   password: ""                 # leave empty for no-auth Redis
+
+  # Prefix prepended to every Redis key (queue names) for namespace isolation.
+  # Example: "iudx:" → keys become "iudx:jobs:report", "iudx:jobs:zip".
+  # Leave empty ("") for no prefix.
+  key_prefix: ""
 
   # Queue to which a readiness message is appended after each Parquet upload.
   readiness_queue_name: jobs:report

@@ -4,4 +4,4 @@ pyarrow>=14.0                 # Parquet read/write
 pandas>=2.1                   # DataFrame manipulation
 pyyaml>=6.0                   # Config file parsing
 apscheduler>=3.10             # In-process scheduler
-redis>=4.0                    # Redis queue (readiness notifications)
+redis>=4.1                    # Redis queue; 4.1+ required for RedisCluster support
