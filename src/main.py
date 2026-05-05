@@ -30,7 +30,7 @@ from checkpoint import CheckpointManager
 from es_client import ESClient
 from redis_client import RedisClient
 from storage_client import StorageClient
-from transformer import json_records_to_parquet
+from transformer import json_records_batches_to_parquet
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -115,17 +115,26 @@ def _process_index(
         logger.info("Index '%s': no new documents (count=%d) – skipping.", index, current_count)
         raise _NoNewData
 
-    # ---- incremental fetch ----------------------------------------------
-    records, last_sort = es.fetch_new_documents(index, search_after=search_after)
+    # ---- incremental fetch + transform (streaming, one batch at a time) -
+    # last_sort and total_docs are updated as a side-effect of _batch_iter
+    # so the checkpoint can be advanced after a successful upload.
+    last_sort = search_after
+    total_docs = 0
 
-    if not records:
+    def _batch_iter():
+        nonlocal last_sort, total_docs
+        for batch, sort in es.iter_new_documents(index, search_after=search_after):
+            last_sort = sort
+            total_docs += len(batch)
+            yield batch
+
+    try:
+        parquet_bytes = json_records_batches_to_parquet(_batch_iter())
+    except ValueError:
         logger.info("Index '%s': search_after returned 0 docs – skipping.", index)
         raise _NoNewData
 
-    logger.info("Index '%s': %d new document(s) to push.", index, len(records))
-
-    # ---- transform -------------------------------------------------------
-    parquet_bytes = json_records_to_parquet(records)
+    logger.info("Index '%s': %d new document(s) to push.", index, total_docs)
 
     # ---- upload ----------------------------------------------------------
     # NOTE: checkpoint is updated only after a successful upload.
