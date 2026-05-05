@@ -137,6 +137,7 @@ def _process_index(
     # matching the same extraction used by es_client.update_catalogue_last_updated.
     databank_id = index.split("__", 1)[-1]
     redis.push_readiness_message(databank_id=databank_id)
+    redis.push_zip_message(databank_id=databank_id)
 
     # ---- update catalogue lastUpdated ------------------------------------
     es.update_catalogue_last_updated(index)
