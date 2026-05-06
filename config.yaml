@@ -20,8 +20,8 @@ elasticsearch:
   index_prefix: ""
 
   # Number of documents fetched per ES page (tune for memory vs. speed).
-  # Lower values reduce peak memory; 1000 is a safe default for large indices.
-  batch_size: 1000
+  # Lower values reduce peak memory; 500 is a safe default for large indices.
+  batch_size: 500
 
   # Index that holds catalogue metadata documents (one doc per dataset UUID).
   # lastUpdated is written here after each successful Parquet upload.

@@ -133,15 +133,20 @@ class ESClient:
                 raise
 
             hits = response["hits"]["hits"]
+            del response  # free full ES response before yielding; hits holds only what we need
             if not hits:
                 break
 
+            batch = [hit["_source"] for hit in hits]
             last_sort = hits[-1]["sort"]
-            yield [hit["_source"] for hit in hits], last_sort
+            page_size = len(hits)
+            del hits  # free hit metadata (ids, scores, sort values); only _source dicts remain
+            yield batch, last_sort
+            del batch
 
             body["search_after"] = last_sort
 
-            if len(hits) < self._batch_size:
+            if page_size < self._batch_size:
                 break  # last page
 
     # ------------------------------------------------------------------
