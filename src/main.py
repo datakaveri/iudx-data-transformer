@@ -17,6 +17,7 @@ Config is loaded from the path specified by the env var CONFIG_PATH
 (default: /app/config.yaml).
 """
 
+import gc
 import logging
 import os
 import sys
@@ -123,10 +124,14 @@ def _process_index(
     total_docs = 0
 
     for batch, sort in es.iter_new_documents(index, search_after=search_after):
+        batch_len = len(batch)
         parquet_bytes = json_records_batches_to_parquet([batch])
+        del batch  # raw dicts freed; only compressed Parquet remains
         storage.upload_parquet(dataset_id=index, data=parquet_bytes)
+        del parquet_bytes  # freed before next ES page is fetched
+        gc.collect()
         checkpoints.update(index=index, search_after=sort, doc_count=current_count)
-        total_docs += len(batch)
+        total_docs += batch_len
 
     if total_docs == 0:
         logger.info("Index '%s': search_after returned 0 docs – skipping.", index)
