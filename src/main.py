@@ -116,6 +116,9 @@ def _process_index(
         logger.info("Index '%s': no new documents (count=%d) – skipping.", index, current_count)
         raise _NoNewData
 
+    # Strip infrastructure prefix (e.g. 'maha-prod__') to get the bare dataset UUID.
+    databank_id = index.split("__", 1)[-1]
+
     # ---- fetch → transform → upload one batch at a time -----------------
     # Each batch is converted to Parquet and uploaded immediately so peak
     # memory is bounded to a single ES page rather than the full index.
@@ -127,7 +130,7 @@ def _process_index(
         batch_len = len(batch)
         parquet_bytes = json_records_batches_to_parquet([batch])
         del batch  # raw dicts freed; only compressed Parquet remains
-        storage.upload_parquet(dataset_id=index, data=parquet_bytes)
+        storage.upload_parquet(dataset_id=databank_id, data=parquet_bytes)
         del parquet_bytes  # freed before next ES page is fetched
         gc.collect()
         checkpoints.update(index=index, search_after=sort, doc_count=current_count)
@@ -140,9 +143,6 @@ def _process_index(
     logger.info("Index '%s': %d new document(s) pushed.", index, total_docs)
 
     # ---- notify Redis readiness queue ------------------------------------
-    # Strip infrastructure prefix (e.g. 'iudx__') to get the bare dataset UUID,
-    # matching the same extraction used by es_client.update_catalogue_last_updated.
-    databank_id = index.split("__", 1)[-1]
     redis.push_readiness_message(databank_id=databank_id)
     redis.push_zip_message(databank_id=databank_id)
 
