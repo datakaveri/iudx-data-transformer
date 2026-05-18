@@ -63,6 +63,7 @@ class StorageClient:
                 Bucket=self._bucket,
                 Key=key,
                 Body=data,
+                ContentLength=len(data),
                 ContentType="application/octet-stream",
             )
             logger.info(
