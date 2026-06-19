@@ -40,7 +40,7 @@ class RedisClient:
     def push_readiness_message(self, databank_id: str) -> None:
         message = {
             "jobId": str(uuid.uuid4()),
-            "type": "report",
+            "type": "all",
             "databankId": databank_id,
             "options": {},
             "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
