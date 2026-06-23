@@ -48,10 +48,12 @@ redis:
   # Leave empty ("") for no prefix.
   key_prefix: ""
 
-  # Queue to which a readiness message is appended after each Parquet upload.
+  # Queue to which a readiness message is pushed after each Parquet upload.
+  # The report worker consumes with BRPOP, so producers use LPUSH to preserve FIFO.
   readiness_queue_name: jobs:report
 
-  # Queue to which a zip job is appended after each Parquet upload.
+  # Queue to which a zip job is pushed after each Parquet upload.
+  # The zip worker consumes with BRPOP, so producers use LPUSH to preserve FIFO.
   zip_queue_name: jobs:zip
 
 # ---- Transformer Behaviour --------------------------------------------------
