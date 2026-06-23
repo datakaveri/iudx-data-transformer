@@ -45,7 +45,7 @@ class RedisClient:
             "options": {},
             "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         }
-        self._client.rpush(self._queue, json.dumps(message))
+        self._client.lpush(self._queue, json.dumps(message))
         logger.info(
             "Pushed readiness message to '%s' for databankId='%s' (jobId=%s)",
             self._queue, databank_id, message["jobId"],
@@ -59,7 +59,7 @@ class RedisClient:
             "options": {},
             "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         }
-        self._client.rpush(self._zip_queue, json.dumps(message))
+        self._client.lpush(self._zip_queue, json.dumps(message))
         logger.info(
             "Pushed zip message to '%s' for databankId='%s' (jobId=%s)",
             self._zip_queue, databank_id, message["jobId"],

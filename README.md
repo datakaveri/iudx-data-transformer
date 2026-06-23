@@ -36,7 +36,7 @@ Incrementally exports JSON documents from Elasticsearch to Parquet files in an S
 │                        └──► Transformer ├───┘  upload                │
 │                           │  (cron job) │                            │
 │                           └──────┬──────┴──────────────────────┐     │
-│                                  │              RPUSH           │     │
+│                                  │              LPUSH           │     │
 │                                  │      ┌───────────────────┐   │     │
 │                                  │      │   Redis  :6379    │◄──┘     │
 │                                  │      │  jobs:report      │         │
@@ -61,15 +61,18 @@ For each Elasticsearch index (= dataset id):
   │
   ├─ 4. Upload to  s3://<bucket>/<index-name>/<timestamp>_<uid>.parquet
   │
-  ├─ 5. RPUSH readiness message → Redis  jobs:report
-  │       { jobId, type: "report", databankId, options: {}, createdAt }
+  ├─ 5. LPUSH readiness message → Redis  jobs:report
+  │       { jobId, type: "all", databankId, options: {}, createdAt }
   │
-  ├─ 6. Update catalogue lastUpdated in Elasticsearch
+  ├─ 6. LPUSH zip job → Redis  jobs:zip
+  │       { jobId, type: "zip", databankId, options: {}, createdAt }
   │
-  └─ 7. Persist new checkpoint (search_after vector + doc count)
+  ├─ 7. Update catalogue lastUpdated in Elasticsearch
+  │
+  └─ 8. Persist new checkpoint (search_after vector + doc count)
 ```
 
-Steps 5–7 only execute after a confirmed successful upload.  If the upload fails, the next run re-fetches the same documents and retries — no partial state is written.
+Steps 5–8 only execute after a confirmed successful upload.  If the upload fails, the next run re-fetches the same documents and retries — no partial state is written.
 
 ### Readiness message payload
 
@@ -136,10 +139,11 @@ iudx-data-transformer/
     │                           - Uploads Parquet bytes under
     │                             <dataset_id>/<timestamp>_<uid>.parquet
     │
-    ├── redis_client.py         Redis readiness publisher.
+    ├── redis_client.py         Redis queue publisher.
     │                           - Connects to the configured Redis instance
-    │                           - After each successful upload, appends a JSON
-    │                             readiness message to jobs:report via RPUSH
+    │                           - After each successful upload, pushes JSON
+    │                             messages to jobs:report via LPUSH and
+    │                             jobs:zip via LPUSH
     │                           - databankId uses the bare dataset UUID
     │                             (iudx__ prefix stripped)
     │
@@ -227,9 +231,13 @@ redis:
   password: ""            # Leave empty for no-auth Redis
 
   readiness_queue_name: jobs:report
-  # List key to which a readiness message is appended (RPUSH) after each
-  # successful Parquet upload. Downstream consumers can BLPOP this queue
-  # to trigger processing without polling.
+  # List key to which a readiness message is pushed (LPUSH) after each
+  # successful Parquet upload. The report worker consumes with BRPOP,
+  # so LPUSH preserves FIFO.
+
+  zip_queue_name: jobs:zip
+  # List key to which a zip job is pushed (LPUSH) after each successful
+  # Parquet upload. The zip worker consumes with BRPOP, so LPUSH preserves FIFO.
 ```
 
 ### Transformer Behaviour
@@ -278,6 +286,7 @@ redis:
   port: 6379
   password: <your-redis-password>
   readiness_queue_name: jobs:report
+  zip_queue_name: jobs:zip
 ```
 
 Then start **only** the cronjob stack (skip `docker-compose.infra.yml`):
@@ -456,7 +465,7 @@ docker exec iudx-redis redis-cli LLEN jobs:report
 docker exec iudx-redis redis-cli LRANGE jobs:report 0 -1
 
 # Pop the next message (as a consumer would)
-docker exec iudx-redis redis-cli LPOP jobs:report
+docker exec iudx-redis redis-cli RPOP jobs:report
 ```
 
 ### Clear the Redis queue
