@@ -43,6 +43,20 @@ redis:
   username: ""                 # leave empty if ACL auth is not configured
   password: ""                 # leave empty for no-auth Redis
 
+  # Redis Sentinel (HA). Takes precedence over cluster_mode/standalone when
+  # enabled. host/port above are then only used to derive the default sentinel
+  # address (<host>:26379); username/password above authenticate to the
+  # master. Each key can be overridden by env: REDIS_SENTINEL_ENABLED,
+  # REDIS_SENTINEL_MASTER_NAME, REDIS_SENTINEL_HOSTS, REDIS_SENTINEL_USERNAME,
+  # REDIS_SENTINEL_PASSWORD. Confirm the master name with:
+  #   redis-cli -p 26379 sentinel masters
+  sentinel:
+    enabled: false
+    master_name: mymaster
+    hosts: ""                  # "h1:26379,h2:26379"; empty → <host>:26379
+    username: ""               # auth for the sentinel nodes themselves
+    password: ""
+
   # Prefix prepended to every Redis key (queue names) for namespace isolation.
   # Example: "iudx:" → keys become "iudx:jobs:report", "iudx:jobs:zip".
   # Leave empty ("") for no prefix.

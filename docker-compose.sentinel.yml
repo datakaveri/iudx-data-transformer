@@ -1,0 +1,90 @@
+# =============================================================================
+# Local Redis Sentinel (HA) topology for developing/testing Sentinel support.
+#
+#   docker compose -f docker-compose.sentinel.yml up -d
+#   docker compose -f docker-compose.sentinel.yml down
+#
+# Topology: 1 master, 1 replica, 3 sentinels (quorum 2), master group "mymaster".
+#
+# This replaces the standalone `redis` service from docker-compose.infra.yml
+# (both publish 6379) – stop that one first.
+#
+# Why the shared network namespace (network_mode: "service:redis-net")?
+# Sentinel returns the master's address to the client verbatim. For that
+# address to be reachable both from the sentinels (health checks) AND from the
+# transformer running on the host, every node lives at 127.0.0.1 and is reached
+# via published ports. Run the transformer on the host with:
+#
+#   REDIS_SENTINEL_ENABLED=true
+#   REDIS_SENTINEL_HOSTS=localhost:26379,localhost:26380,localhost:26381
+#
+# For a real deployment point REDIS_SENTINEL_HOSTS at your Sentinel service.
+# =============================================================================
+
+services:
+  # Network-namespace holder: owns/publishes every port the others bind.
+  redis-net:
+    image: alpine:3.20
+    container_name: iudx-redis-net
+    command: sleep infinity
+    ports:
+      - "6379:6379"   # master
+      - "6380:6380"   # replica
+      - "26379:26379" # sentinel-1
+      - "26380:26380" # sentinel-2
+      - "26381:26381" # sentinel-3
+
+  redis-master:
+    image: redis:7.4-alpine
+    container_name: iudx-redis-master
+    network_mode: "service:redis-net"
+    command: redis-server --port 6379 --appendonly yes
+    depends_on: [redis-net]
+
+  redis-replica:
+    image: redis:7.4-alpine
+    container_name: iudx-redis-replica
+    network_mode: "service:redis-net"
+    command: redis-server --port 6380 --replicaof 127.0.0.1 6379 --appendonly yes
+    depends_on: [redis-master]
+
+  sentinel-1: &sentinel
+    image: redis:7.4-alpine
+    container_name: iudx-sentinel-1
+    network_mode: "service:redis-net"
+    depends_on: [redis-master, redis-replica]
+    command: >
+      sh -c 'printf "%s\n"
+      "port 26379"
+      "sentinel monitor mymaster 127.0.0.1 6379 2"
+      "sentinel down-after-milliseconds mymaster 5000"
+      "sentinel failover-timeout mymaster 10000"
+      "sentinel parallel-syncs mymaster 1"
+      > /tmp/sentinel.conf
+      && exec redis-server /tmp/sentinel.conf --sentinel'
+
+  sentinel-2:
+    <<: *sentinel
+    container_name: iudx-sentinel-2
+    command: >
+      sh -c 'printf "%s\n"
+      "port 26380"
+      "sentinel monitor mymaster 127.0.0.1 6379 2"
+      "sentinel down-after-milliseconds mymaster 5000"
+      "sentinel failover-timeout mymaster 10000"
+      "sentinel parallel-syncs mymaster 1"
+      > /tmp/sentinel.conf
+      && exec redis-server /tmp/sentinel.conf --sentinel'
+
+  sentinel-3:
+    <<: *sentinel
+    container_name: iudx-sentinel-3
+    command: >
+      sh -c 'printf "%s\n"
+      "port 26381"
+      "sentinel monitor mymaster 127.0.0.1 6379 2"
+      "sentinel down-after-milliseconds mymaster 5000"
+      "sentinel failover-timeout mymaster 10000"
+      "sentinel parallel-syncs mymaster 1"
+      > /tmp/sentinel.conf
+      && exec redis-server /tmp/sentinel.conf --sentinel'

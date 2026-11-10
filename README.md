@@ -112,6 +112,9 @@ iudx-data-transformer/
 │                               Owns the shared Docker network (iudx-net)
 │                               and named data volumes.
 │
+├── docker-compose.sentinel.yml Local Redis Sentinel topology (1 master,
+│                               1 replica, 3 sentinels) for HA testing.
+│
 ├── docker-compose.cronjob.yml  Application: Transformer cron job
 │                               Joins iudx-net as an external network.
 │                               Mounts config.yaml and a checkpoints volume.
@@ -140,7 +143,9 @@ iudx-data-transformer/
     │                             <dataset_id>/<timestamp>_<uid>.parquet
     │
     ├── redis_client.py         Redis queue publisher.
-    │                           - Connects to the configured Redis instance
+    │                           - Connects in sentinel, cluster or standalone
+    │                             mode (that precedence)
+    │                           - Retries pushes during a Sentinel failover
     │                           - After each successful upload, pushes JSON
     │                             messages to jobs:report via LPUSH and
     │                             jobs:zip via LPUSH
@@ -228,7 +233,16 @@ object_store:
 redis:
   host: redis             # Hostname or IP of the Redis node
   port: 6379              # Redis port
+  cluster_mode: false     # true only against a real Redis Cluster
+  username: ""            # ACL user, if configured
   password: ""            # Leave empty for no-auth Redis
+
+  sentinel:               # Redis Sentinel (HA) – see "Redis Sentinel" below
+    enabled: false
+    master_name: mymaster
+    hosts: ""             # "h1:26379,h2:26379"; empty → <host>:26379
+    username: ""          # auth for the sentinel nodes themselves
+    password: ""
 
   readiness_queue_name: jobs:report
   # List key to which a readiness message is pushed (LPUSH) after each
@@ -238,6 +252,58 @@ redis:
   zip_queue_name: jobs:zip
   # List key to which a zip job is pushed (LPUSH) after each successful
   # Parquet upload. The zip worker consumes with BRPOP, so LPUSH preserves FIFO.
+```
+
+#### Redis Sentinel
+
+With `sentinel.enabled: true` the transformer asks the sentinels which node is
+the current master, writes to it, and re-discovers the master automatically
+after a failover. Mode precedence is **sentinel → cluster → standalone**, so
+enabling Sentinel overrides `cluster_mode`.
+
+- `host`/`port` are then only used to derive the default sentinel address
+  (`<host>:26379`) when `sentinel.hosts` is empty.
+- `username`/`password` authenticate to the Redis **data** nodes;
+  `sentinel.username`/`sentinel.password` authenticate to the **sentinel** nodes.
+- Every sentinel key can be overridden by environment variable, using the same
+  names as files-connect-api and its workers: `REDIS_SENTINEL_ENABLED`,
+  `REDIS_SENTINEL_MASTER_NAME`, `REDIS_SENTINEL_HOSTS`,
+  `REDIS_SENTINEL_USERNAME`, `REDIS_SENTINEL_PASSWORD`.
+- Use the **same master name** as the API and workers. Confirm it with
+  `redis-cli -p 26379 sentinel masters`.
+- Before every push the transformer asks Sentinel for the current master and
+  reconnects if it has changed. Pushes that fail with a connection, timeout,
+  `READONLY` or `NOREPLICAS` error (expected while a replica is being promoted)
+  are retried with exponential backoff for up to ~25 s.
+
+> **Recommended on the Redis side:** set `min-replicas-to-write 1` and
+> `min-replicas-max-lag 10` on the data nodes. Redis replication is
+> asynchronous: for about a second after a failover, the old master still
+> accepts writes that are discarded when Sentinel demotes it. In local
+> failover tests, 3–5 pushes were lost in that window without the setting and
+> none with it, because the old master answers `NOREPLICAS`, which the
+> transformer retries against the new master. Use it only with at least
+> **two** replicas, otherwise writes stall until the demoted master
+> re-attaches as a replica.
+
+On startup the transformer logs:
+
+```
+transformer.redis – Connecting to Redis Sentinel [('localhost', 26379), ...] master=mymaster
+transformer.redis – Redis client initialised – mode=sentinel master=mymaster sentinels=[...] ...
+```
+
+To try it locally, stop the standalone `redis` container (both use port 6379)
+and start the Sentinel topology:
+
+```bash
+docker compose -f docker-compose.sentinel.yml up -d
+```
+
+Force a failover to check that pushes follow the new master:
+
+```bash
+docker exec iudx-sentinel-1 redis-cli -p 26379 sentinel failover mymaster
 ```
 
 ### Transformer Behaviour
@@ -414,7 +480,7 @@ docker logs -f iudx-transformer 2>&1 | grep "Pushed readiness"
 
 ```
 2026-03-04T09:00:00 INFO     transformer.main  – Configuration loaded from /app/config.yaml
-2026-03-04T09:00:00 INFO     transformer.redis – Redis client initialised – host=redis port=6379 queue=jobs:report
+2026-03-04T09:00:00 INFO     transformer.redis – Redis client initialised – mode=standalone host=redis port=6379 prefix='' queue=jobs:report zip_queue=jobs:zip
 2026-03-04T09:00:00 INFO     transformer.main  – Scheduler configured – interval=15 minutes.
 2026-03-04T09:00:00 INFO     transformer.main  – === Transformation run started ===
 2026-03-04T09:00:01 INFO     es_client         – Found 4 dataset indices.
